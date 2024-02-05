@@ -1,126 +1,60 @@
 import requests
-import pandas as pd
 import numpy as np
+from Pydref import Pydref
 from retry import retry
-import concurrent.futures
-import logging
-import threading
-import sys
-import ast
-from pydref import Pydref
+import requests
+import pandas as pd
 #url matcher structure
-url="https://affiliation-matcher.staging.dataesr.ovh/match"
+url='https://affiliation-matcher.staging.dataesr.ovh/match'
 
 
 #fonction identifie structure
+@retry(delay=200, tries=30000)
 def identifie_structure(row):
-    f= f"{row['Projet.Partenaire.Nom_organisme']} {row['Projet.Partenaire.Adresse.Ville']} {row['Projet.Partenaire.Adresse.Pays']} "
-    rnsr=requests.post(url, json= { "query" : f , "type":"rnsr", "year": int("20"+row['Projet.Code_Decision_ANR'][4:6])})
+    url='https://affiliation-matcher.staging.dataesr.ovh/match'
+    f= f"{row['Projet.Partenaire.Nom_organisme']} {row['Projet.Partenaire.Adresse.Ville']} {row['Projet.Partenaire.Adresse.Pays']}"
+    rnsr=requests.post(url, json= {"type":"rnsr","year":"20"+str(row['Projet.Code_Decision_ANR'][4:6]),"query":f,"verbose":False})
     ror=requests.post(url, json= { "query" : f , "type":"ror"})
     grid=requests.post(url, json= { "query" : f , "type":"grid"})
     result_rnsr=rnsr.json()['results']
     result_ror=ror.json()['results']
     result_grid=grid.json()['results']                               
     if result_rnsr != []:
-        print (result_rnsr)
         return result_rnsr
-    elif result_rnsr == [] and result_grid != []:
-        print (result_grid)
+    elif result_rnsr != [] and result_grid != []:
         return result_grid
-    elif result_rnsr == [] and result_grid == [] and result_ror != []:
-        print (result_ror)
+    elif result_rnsr != [] and result_grid == [] and result_ror != []:
         return result_ror
     else:
-        print (None)
         return None
 
-#fonctions qui identifie les personnes
-
-
-def get_logger(name):
-    loggers = {}
-    if name in loggers:
-        return loggers[name]
-    logger = logging.getLogger(name)
-    logger.setLevel(logging.DEBUG)
-    fmt = '%(asctime)s - %(threadName)s - %(levelname)s - %(message)s'
-    formatter = logging.Formatter(fmt)
-
-    ch = logging.StreamHandler(sys.stdout)
-    ch.setFormatter(formatter)
-    logger.addHandler(ch)
-
-    loggers[name] = logger
-    return loggers[name]
-
-
-def res_futures(dict_nb):
-    res = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=11, thread_name_prefix="thread") as executor:
-        # Start the load operations and mark each future with its URL
-        future_to_req = {executor.submit(query, df): df for df in dict_nb.values()}
-        for future in concurrent.futures.as_completed(future_to_req):
-            req = future_to_req[future]
-            try:
-                data = future.result()
-                res.append(data)
-                jointure = pd.concat(res)
-            except Exception as exc:
-                print('%r generated an exception: %s' % (req, exc), flush=True)
-
-    return jointure
-
-
-@retry(tries=3, delay=5, backoff=5)
-def query(df):
+#fonction identifie personne
+@retry(delay=200, tries=30000)
+def identifie_personne(row):
     pydref = Pydref()
-    logger = get_logger(threading.current_thread().name)
-    logger.info("start")
-    part_idref = {"nom": [], "prenom": [],"code_anr":[], "idref": []}
-    for _, r in df.iterrows():
-        try:
-            name = r['Projet.Partenaire.Responsable_scientifique.Prenom'] + " " + r['Projet.Partenaire.Responsable_scientifique.Nom']
-            result = pydref.identify(name)
-            if result.get("status") == "found" and result['idref']!='idref073954012':
-                part_idref["nom"].append(r['Projet.Partenaire.Responsable_scientifique.Nom'])
-                part_idref["prenom"].append(r['Projet.Partenaire.Responsable_scientifique.Prenom'])
-                part_idref["code_anr"].append(r['Projet.Code_Decision_ANR'])
-                part_idref["idref"].append(result.get("idref"))
-        except:
-            pass
-
-    df = pd.DataFrame(data=part_idref)
-    logger.info("end")
-
-    return df
-
-
-def subset_df(df):
-    prct10 = int(round(len(df) * 10 / 100, 0))
-    dict_nb = {}
-    deb = 0
-    fin = prct10
-    dict_nb["df1"] = df.iloc[deb:fin, :]
-    deb = fin + 1
-    dixieme = 10 * prct10
-    reste = (len(df) - dixieme)
-    fin_reste = len(df) + 1
-    for i in range(2, 11):
-        fin = (i * prct10 + 1)
-        dict_nb["df" + str(i)] = df.iloc[deb:fin, :]
-        if reste > 0:
-            dict_nb["reste"] = df.iloc[fin: fin_reste, :]
-        deb = fin
-
-    return dict_nb
-
+    result = pydref.identify(f"{row['Projet.Partenaire.Responsable_scientifique.Prenom']} {row['Projet.Partenaire.Responsable_scientifique.Nom']}")
+    if result['status']=='found' and result['idref']!='idref073954012':
+        #print('ok')
+        return result.get('idref')
+    elif result['status']=='not_found_ambiguous':
+        return f"{result['nb_homonyms']}_homonyms__not_found_ambiguous "
+    else:
+        #print('zut')
+        return None    
+ 
+#fonction qui nettoie le nom de chaque structure sur scnaR
+def nettoie_scanR(x):
+    if (isinstance(x, dict)):
+        if pd.isna(x['label'].get('default'))!=True:
+            return x['label'].get('default').split('__-__')[0]
+        else:
+            return None
+    else:
+        return None
 
 #fonction qui hiérarchise les identifiants selon la préférance
 def identifiant_prefere(row):
-    if str(row['id']) != 'None' and str(row['id']) != 'NaN' and row['id'] is not np.nan :
-        return row['id']
-    elif str(row['Projet.Partenaire.Code_RNSR']) != 'None' and str(row['Projet.Partenaire.Code_RNSR']) != 'NaN' and row['Projet.Partenaire.Code_RNSR'] is not np.nan :
-        print('ok')
+    if str(row['Projet.Partenaire.Code_RNSR']) != 'None' and str(row['Projet.Partenaire.Code_RNSR']) != 'NaN' and row['Projet.Partenaire.Code_RNSR'] is not np.nan :
         return row['Projet.Partenaire.Code_RNSR']
     elif str(row['id_structure_matcher']) != 'None' and str(row['id_structure_matcher']) != 'NaN' and row['id_structure_matcher'] is not np.nan :
         return row['id_structure_matcher']
@@ -130,30 +64,6 @@ def identifiant_prefere(row):
         return row['code']
     else:
         return None
-    
-#fonction pour éliminer les doublons inintéressants pour Emmanuel
-
-def doublons(df,row):
-    s=0
-    for i in list(df.loc[row.index[0]:,'Projet.Partenaire.Nom_organisme2']):
-        if i == row['Projet.Partenaire.Nom_organisme2']:
-            s+=1
-    if s > 1:
-        if row['id_structure'] is np.nan or str(row['id_structure']) == 'None' or str(row['id_structure']) == 'NaN':
-            return True
-        else:
-            print('ok')
-            return False
-    else:
-        print('ok')
-        return False
-
-def pas_trouve(x):
-    if x is np.nan or str(x) == 'None' or str(x) == 'NaN':
-        return True
-    else:
-        print('ok')
-        return False
     
 #fonction pour donner un identifiant a ceux qui en ont pas
 
@@ -262,44 +172,84 @@ dic={" - japon":"","(vub)":"","d'hebron":""," (south africa)":"",
      " l'a":""," l'e":""," l'i":""," l'o":""," l'u":""," l'h":"",
      " l´a":""," l´e":""," l´i":""," l´o":""," l´u":""," l´h":"",
      " la":""," le":""," li":""," lo":""," lu":""," lh":"",
-     "’":"","´":"","–":"","/":"",":":"","-":"","'":""," ":"","et":"","de":""}
+     "’":"","´":"","–":"","/":"",":":"","-":"","'":""," ":"","et":"","de":"","actalia food safety":""}
 
 def replace_all(row):
     for i, j in dic.items():
         row = row.replace(i, j)
     return row
 
-def replace_accent(x):
-    for i in range(len(x)):
-        x[i]=str(x[i]).replace("'"," ").replace("´"," ").replace("’"," ")
-    return x
 
-# fonction qui envoie les données sur scanR
+#fonction qui donne un idref à partir d'un ORCID
+        
+def orcid_to_idref(row):
+    orcid=row['Projet.Partenaire.Responsable_scientifique.ORCID']
+    url=f'https://cluster-production.elasticsearch.dataesr.ovh/bso-orcid-20231024/_search?q=orcid:"{orcid}"'
+    res = requests.get(url, headers={'Authorization': 'Basic QlNPOnZuODRxOVhlZjlVN3BtVQ=='}).json()
+    if res['hits']['hits']!=[]:
+        if 'idref_abes' in list(res['hits']['hits'][0]['_source'].keys()):
+            if res['hits']['hits'][0]['_source']['idref_abes']!=None:
+                return res['hits']['hits'][0]['_source']['idref_abes']
+            else:
+                return None
+        else:
+            return None
+    else:
+        return None
 
-def envoi_scanR(url,row):
-    try:
-        print(row.to_dict())
-        r=requests.post(url, json = row.to_dict() ,headers={"Content-Type":"application/json",'Authorization': 'Basic cm9vdDp0b25uZXJyZTJCcmVzdA=='})
-        print('ok')
-        print(r.status_code)
-        print(r.json())
-    except Exception  as e:
-        print(e)
-    
+#fonction qui récupère les identifiants idref des 2 colonnes: "idref" et "idref_ORCID"
 
-#fonction qui réunis les personnes d'un meme projet ANR
-
-def reunir_personnes(row):
-    dic={}
-    if row['first_name'][0] is not np.nan or row['first_name'][0]!='nan':
-        for i in range(len(row['first_name'])):
-            d=str('{'+f"'identified':'{row['identified'][i]}','last_name':'{str(row['last_name'][i])}','first_name':'{str(row['first_name'][i])}','role':'{str(row['role'][i])}','id':'{str(row['id'][i])}'"+'}')
-            d=ast.literal_eval(d)
-            dic[i]= d
-        return dic
+def recup_id_personne(row):
+    if (pd.isna(row['id_personne'])==False)&(row['id_personne']!=None)&(str(row['id_personne'])[2:10]!='homonyms')&(str(row['id_personne'])[3:11]!='homonyms'):
+        return row['id_personne']
+    elif ((pd.isna(row['id_personne']))|(row['id_personne']==None)|(str(row['id_personne'])[2:10]=='homonyms')|(str(row['id_personne'])[3:11]=='homonyms'))&((pd.isna(row['idref_ORCID'])==False)|(row['idref_ORCID']!=None)):
+        return row['idref_ORCID']
     else:
         return None
     
+#fonction qui créé un dictionnaire pour une personne sous la forme: {"id":"idref", "first_name":"prénom", "last_name":"nom" }
+
+def persons(row):
+    if (pd.isna(row['id_structure'])==False)&(row['id_structure']!='x'):
+        dict_row={"id" : row['id_person'], "first_name": row['Projet.Partenaire.Responsable_scientifique.Prenom'], "last_name": row['Projet.Partenaire.Responsable_scientifique.Nom'], "role":f"scientific-officer###{str(row['id_structure'])}"}
+    else:
+        dict_row={"id" : row['id_person'], "first_name": row['Projet.Partenaire.Responsable_scientifique.Prenom'], "last_name": row['Projet.Partenaire.Responsable_scientifique.Nom'], "role":"scientific-officer"}
+    dict_row2={k:v for k,v in dict_row.items() if (pd.isna(v)==False)}
+    return dict_row2
+
+#fonctions qui mets les titres et résumés sous forme de dictionnaire : {"fr": "titre ou résumé en français", "en": "titre ou résumé en anglais"}
+
+def name(row):
+    if (pd.isna(row['Projet.Titre.Francais'])==False)&(pd.isna(row['Projet.Titre.Anglais'])==False):
+        return {"fr": row['Projet.Titre.Francais'], "en": row['Projet.Titre.Anglais']}
+    elif (pd.isna(row['Projet.Titre.Francais']))&(pd.isna(row['Projet.Titre.Anglais'])==False):
+        return {"en": row['Projet.Titre.Anglais']}
+    elif (pd.isna(row['Projet.Titre.Francais'])==False)&(pd.isna(row['Projet.Titre.Anglais'])):
+        return {"fr": row['Projet.Titre.Francais']}
+    else:
+        return None
+
+def description(row):
+    if (pd.isna(row['Projet.Resume.Francais'])==False)&(pd.isna(row['Projet.Resume.Anglais'])==False):
+        return {"fr": row['Projet.Resume.Francais'], "en": row['Projet.Resume.Anglais']}
+    elif (pd.isna(row['Projet.Resume.Francais']))&(pd.isna(row['Projet.Resume.Anglais'])==False):
+        return {"en": row['Projet.Resume.Anglais']}
+    elif (pd.isna(row['Projet.Resume.Francais'])==False)&(pd.isna(row['Projet.Resume.Anglais'])):
+        return {"fr": row['Projet.Resume.Francais']}
+    else:
+        return None
+    
+#fonctions qui mets lalocalisation de la structure sous forme de dictionnaire : {"city": "ville où est basée la structure", "country": "pays où est basée la structure"}
+
+def address(row):
+    if (pd.isna(row['Projet.Partenaire.Adresse.Ville'])==False)&(pd.isna(row['Projet.Partenaire.Adresse.Pays'])==False):
+        return {"city": row['Projet.Partenaire.Adresse.Ville'], "country": row['Projet.Partenaire.Adresse.Pays']}
+    elif (pd.isna(row['Projet.Partenaire.Adresse.Ville']))&(pd.isna(row['Projet.Partenaire.Adresse.Pays'])==False):
+        return {"country": row['Projet.Partenaire.Adresse.Pays']}
+    elif (pd.isna(row['Projet.Partenaire.Adresse.Ville'])==False)&(pd.isna(row['Projet.Partenaire.Adresse.Pays'])):
+        return {"city": row['Projet.Partenaire.Adresse.Ville']}
+    else:
+        return None
 
 
 

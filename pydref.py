@@ -1,6 +1,26 @@
 import requests
+import unicodedata
+import string
 from bs4 import BeautifulSoup
 import datetime
+
+NOT_SCIENTIST_TOKEN = ['chanteur', 'dramaturge', 'journalist', 'poete', 'theater', 'theatre']
+
+def strip_accents(w: str) -> str:
+    """Normalize accents and stuff in string."""
+    return ''.join(
+        c for c in unicodedata.normalize('NFD', w)
+        if unicodedata.category(c) != 'Mn')
+
+
+def delete_punct(w: str) -> str:
+    """Delete all punctuation in a string."""
+    return w.lower().translate(
+        str.maketrans(string.punctuation, len(string.punctuation) * ' '))
+
+def normalize(x):
+    x = x.replace('\xa0', ' ')
+    return strip_accents(delete_punct(x)).lower().strip()
 
 class Pydref(object):
     """ Wrapper around the PubMed API.
@@ -49,15 +69,18 @@ class Pydref(object):
     def get_idref_notice(self: object, idref: str):
         """ Method that downloads the xml notice of a given idref
         """
-        
-        r = requests.get("http://www.idref.fr/{}.xml".format(idref))
-        if r.status_code != 200:
-            print("Error in getting notice {} : {}".format(idref, r.text))
+        try: 
+            r = requests.get("https://www.idref.fr/{}.xml".format(idref))
+            if r.status_code != 200:
+                print("Error in getting notice {} : {}".format(idref, r.text))
+                return {}
+            return r.text
+        except:
+            print("Error in getting notice {}".format(idref))
             return {}
-        return r.text
     
     
-    def get_idref(self: object, query: str):
+    def get_idref(self: object, query: str, min_birth_year, min_death_year, is_scientific, exact_fullname):
         """ Method that first permorf a query and then parses the main infos of the results
         """
         
@@ -69,30 +92,59 @@ class Pydref(object):
             if 'ppn_z' in d:
                 person = {'idref' : "idref{}".format(d['ppn_z'])}
                 notice = self.get_idref_notice(d['ppn_z'])
+                if not notice:
+                    continue
                 soup = BeautifulSoup(notice, 'lxml')
                 person_name = self.get_name_from_idref_notice(soup)
                 person['last_name'] = person_name.get("last_name")
                 person['first_name'] = person_name.get("first_name")
+                person['full_name'] = f"{person['first_name']} {person['last_name']}".strip()
+                person['full_name2'] = f"{person['last_name']} {person['first_name']}".strip()
+                exact_fullname = [normalize(person['full_name']), normalize(person['full_name2'])]
+
+                if normalize(query) not in exact_fullname:
+                    print(f'no exact fullname match for {query} vs {exact_fullname}')
+                    continue
                 birth, death = self.get_birth_and_death_date_from_idref_notice(soup)
                 if birth:
                     person['birth_date'] = birth
                 if death:
                     person['death_date'] = death
 
+                if birth and int(birth[0:4]) < min_birth_year:
+                    print(f'skipping birth date {birth}')
+                    continue
+                
+                if death and int(death[0:4]) < min_death_year:
+                    print(f'skipping death date {death}')
+                    continue
+
                 identifiers = self.get_identifiers_from_idref_notice(soup)
                 person['identifiers'] = identifiers
+
+                skip = False
                 person['description'] = self.get_description_from_idref_notice(soup)
+                if is_scientific:
+                    for d in person['description']:
+                        for w in NOT_SCIENTIST_TOKEN:
+                            if w in d.lower():
+                                skip = True
+                                print(f'skipping {d}')
+                                break
+                if skip:
+                    continue
+
                 person['gender'] = self.get_gender(soup)
 
                 possible_match.append(person)
         return possible_match
     
-    def identify(self: object, query: str):
+    def identify(self: object, query: str, min_birth_year = 1920, min_death_year = 2005, is_scientific = True, exact_fullname = True):
         """ Method that try to identify an idref from a simple input
             Return a match only if the solr engine gives exactly one result
         """
         
-        all_idref = self.get_idref(query)
+        all_idref = self.get_idref(query, min_birth_year, min_death_year, is_scientific, exact_fullname)
         if len(all_idref) == 1:
             res = all_idref[0].copy()
             res['status'] = 'found'
