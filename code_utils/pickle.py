@@ -1,4 +1,3 @@
-import pandas as pd
 import pickle
 
 def write_cache(cached_openalex_data,path):
