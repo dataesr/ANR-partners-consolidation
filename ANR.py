@@ -8,8 +8,10 @@ tqdm.pandas()
 from code_utils.pickle import load_cache,write_cache
 import os
 from dotenv import load_dotenv
+import json
 
 load_dotenv()
+
 Authorization = os.getenv('Authorization')
 
 ########################################### amener les partenaires depuis le site de l'anr #########################################################
@@ -122,6 +124,8 @@ df_partenaires.to_excel('df_partenaires_id_person_ORCID.xlsx')
 
 
 
+
+
 ############################################################ ENVOI DES PROJETS SUR SCANR #########################################################
 
 df_partenaires=pd.read_json('C:/Users/haallat/Documents/ANR/df_partenaires_id_person_ORCID.json')
@@ -143,8 +147,26 @@ df_projets=pd.merge(df_projets,df_partenaires,on='Projet.Code_Decision_ANR', how
 df_projets['type']="ANR"
 df_projets['name']=df_projets.progress_apply(lambda row: name(row) ,axis=1)
 df_projets['description']=df_projets.progress_apply(lambda row: description(row) ,axis=1)
-df_projets=df_projets.rename(columns={'Projet.Code_Decision_ANR': 'id', 'Projet.Acronyme': 'acronym', 'AAP.Edition':'year', 'Projet.Aide_allouee':'budget_financed'})
+df_projets=df_projets.rename(columns={'Projet.Code_Decision_ANR': 'id', 'Projet.Acronyme': 'acronym', 'AAP.Edition':'year', 'Projet.Montant.AF.Aide_allouee.ANR':'budget_financed'})
 df_projets=df_projets[['id','type','name','description','acronym','year','budget_financed','persons']]
+
+############################################################ POUR METTRE A JOUR LES NOUVEAUX PROJETS ANR - PROJETS #########################################################
+
+nbr_page=int(requests.get('http://185.161.45.213/projects/projects?where={"type":"ANR"}&projection={"id":1}&max_results=500&page=1', headers={"Authorization":Authorization}).json()['hrefs']['last']['href'].split('page=')[1])
+
+list_ids=[]
+for i in range(1,nbr_page+1):
+    print("page",i)
+    page=requests.get('http://185.161.45.213/projects/projects?where={"type":"ANR"}&projection={"id":1}&max_results=500'+f"&page={i}", headers={"Authorization":Authorization}).json()
+    for k in range(len(page['data'])):
+        print("k",k)
+        list_ids.append(page['data'][k]['id'])
+    
+projets_a_ajouter=[x for x in list(df_projets['id']) if x not in list_ids]
+
+projets_a_retirer=[x for x in list_ids if x not in list(df_projets['id'])]
+
+df_projets = df_projets[df_projets['id'].apply(lambda x: x in projets_a_ajouter)]
 
 ##envoi
 err=[]
@@ -164,6 +186,13 @@ for i,row in df_projets.iterrows():
         
 #pd.Series([x.get('issues').get('id')[25:] for x in err]).drop_duplicates().tolist() #si jamais il y a des erreurs
 
+
+
+
+
+
+
+
 ############################################################ ENVOI DES PARTENAIRES SUR SCANR #########################################################
 
 df_partenaires=pd.read_json('df_partenaires_id_structures.json')
@@ -175,6 +204,34 @@ df_partenaires['project_type']='ANR'
 df_partenaires['participant_id']=df_partenaires.loc[:,'participant_id'].apply(lambda x: x[0] if isinstance(x,list) else str(x).split(';')[0])
 df_partenaires=df_partenaires[['id','project_id', 'project_type', 'participant_id', 'role', 'name','address']]
 df_partenaires
+
+############################################################ POUR METTRE A JOUR LES NOUVEAUX PROJETS ANR - PARTENAIRES #########################################################
+
+# n=len(df_partenaires)//100
+# list_100_by_100=[int(f"{i}00") for i in range(0,n+1)]
+# index_list=list_100_by_100+[list_100_by_100[-1]+(len(df_partenaires)%100)+1]
+# dfs_partenaires=[df_partenaires.iloc[index_list[i]:index_list[i+1],:] for i in range(n+1)]
+
+nbr_page=int(requests.get('http://185.161.45.213/projects/participations?where={"project_type":"ANR"}&projection={"project_id":1}&max_results=500&page=1', headers={"Authorization":Authorization}).json()['hrefs']['last']['href'].split('page=')[1])
+
+list_ids=[]
+for i in range(1,nbr_page+1):
+    print("page",i)
+    page=requests.get('http://185.161.45.213/projects/participations?where={"project_type":"ANR"}&projection={"project_id":1}&max_results=500'+f"&page={i}", headers={"Authorization":Authorization}).json()
+    for k in range(len(page['data'])):
+        print("k",k)
+        list_ids.append(page['data'][k]['project_id'])
+        
+# projets_a_ajouter=[]    
+# for df in dfs_partenaires:
+#     list_anr_ids=list(df['Projet.Code_Decision_ANR']) 
+#     projets_a_ajouter.append([x for x in list_anr_ids if x not in list_ids])
+    
+projets_a_ajouter=[x for x in list(df_partenaires['project_id'].drop_duplicates()) if x not in list(pd.Series(list_ids).drop_duplicates())]
+
+projets_a_retirer=[x for x in list_ids if x not in list(df_partenaires['project_id'])]
+
+df_partenaires = df_partenaires[df_partenaires['project_id'].apply(lambda x: x in projets_a_ajouter)]
 
 dict_row=df_partenaires.iloc[0,:].to_dict()
 print(dict_row)
@@ -197,7 +254,6 @@ for i,row in df_partenaires.iterrows():
         pp.pprint(e)
 
 #pd.Series([x.get('issues').get('id')[25:] for x in err]).drop_duplicates().tolist() #si jamais il y a des erreurs
-
 
 
 
@@ -227,27 +283,6 @@ print(len(df_projets[(df_projets['oriente_ia'])&(df_projets['AAP.Edition']>2018)
 df_projets_ia=df_projets[(df_projets['oriente_ia'])&(df_projets['AAP.Edition']>2018)&(df_projets['AAP.Edition']<2024)]
 
 df_projets_ia[['Projet.Code_Decision_ANR','Projet.Acronyme','id_structure','persons']].to_excel('df_partenaires_ia.xlsx')
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 
